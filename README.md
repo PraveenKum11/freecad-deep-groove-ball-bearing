@@ -10,11 +10,7 @@ the dialog, done. Every size can be changed later from a single place.
 Tested with FreeCAD 1.1.
 
 ## Demo
-
-[![Demo video: grooving a part with a bore, then creating a bearing from scratch](images/demo-poster.png)](images/demo.mp4)
-
-One minute, no sound: grooving a part with a bore (the part becomes the outer race), then
-creating races, cage and balls from scratch. Click the image to play.
+https://github.com/user-attachments/assets/4f46b9cc-24fc-4756-bc11-ebbdaf7f957a
 
 ## Install and run
 
