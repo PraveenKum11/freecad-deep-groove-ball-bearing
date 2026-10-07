@@ -1,0 +1,921 @@
+# -*- coding: utf-8 -*-
+# DeepGrooveBallBearing.FCMacro
+#
+# Usage:
+#   1. Select a circular edge, or nothing at all.
+#   2. Run the macro and choose how to get the races:
+#      - "Use existing races": the edge must be on the inner or outer diameter of a
+#        ring blank in a PartDesign Body. ID, OD and height are measured from it.
+#      - "Create races": the edge (on anything, e.g. a shaft or a housing bore) sets
+#        the bearing's position, axis and either its ID or its OD. With nothing
+#        selected, the races are created at the origin on the Z axis.
+#   3. Enter the ball diameter, number of balls and the cage/ball options. A sketch is
+#      created in a plane containing the bearing axis, and one PartDesign Groove cuts it
+#      around that axis, splitting the blank into the (disconnected) inner and outer races.
+#   4. Optionally a snap-in cage is built in a separate "Cage" Body between the races,
+#      and the balls in a separate "Balls" Body (off by default).
+#
+# Parameters live on a "BearingParameters" datum coordinate system inside the races
+# Body (one per bearing). Select it in the tree to edit:
+#   Bearing: ID, OD, Height, BallDiameter, NumBalls  (ID/OD/Height are read-only when measured)
+#   Cage:    CageThickness, CageTopOffset, PocketClearance, PocketRise
+# (They can't sit on the Body itself: FreeCAD forbids a Body's features from
+# referencing the Body's own properties -- "cyclic reference".)
+#
+# The datum is the bearing frame: origin on the axis at mid-height, Z = bearing axis.
+# The groove sketch is attached to its XZ plane, and the Cage and Balls bodies follow it.
+#
+# Groove profile (deep-groove-bb.FCStd / Sketch001):
+#   - Ball circle (construction), centered at the pitch diameter, mid-height
+#   - Slot of width = ball diameter / 2, centered on the ball, through the full height
+#   - Outline = the slot walls + the ball arcs that bulge into each race
+#
+# Cage (deep-groove-bb.FCStd / Cage body):
+#   - Ring of CageThickness centered on the pitch diameter, from the bottom face up to
+#     CageTopOffset below where the slot walls meet the ball
+#   - Ball pocket of Ø (BallDiameter + PocketClearance), rising PocketRise above the
+#     cage top (snap-in opening), polar-patterned NumBalls times
+#   - Shown seated: in use the balls pull the cage along the axis until the pockets are
+#     centered on them, so the whole cage is shifted by that amount (it then sits
+#     slightly inside the races). This holds whether or not the balls are modelled.
+#
+# Balls:
+#   - Sphere of BallDiameter at the pitch diameter, mid-height (in line with the cage
+#     pockets), polar-patterned NumBalls times
+#
+# Sketch coordinate system (groove and cage sketches):
+#   - Origin  : on the bearing axis, at mid-height
+#   - X axis  : radial direction (outward)
+#   - Y axis  : bearing axis (V_Axis) -- grooves and revolutions turn around this
+
+import math
+import textwrap
+
+import FreeCAD as App
+import Part
+import Sketcher
+
+TOL = 1e-6
+PARAMS = "BearingParameters"
+EXISTING = "Use existing races"
+CREATE = "Create races"
+SIN60 = math.sqrt(3) / 2  # slot = ball Ø / 2, so the slot walls meet the ball at 60°
+
+# Help texts: shown as dialog tooltips and as the datum's property descriptions
+BEARING_DOCS = {
+    "ID": "Bore of the inner race, i.e. the shaft diameter the bearing fits on.",
+    "OD": "Outside diameter of the outer race, i.e. the housing bore the bearing fits in.",
+    "Height": "Axial width of the bearing (B in bearing catalogues). The balls and race "
+    "grooves are centered in it.",
+    "BallDiameter": "Diameter of the balls. The balls run on the pitch diameter, midway between "
+    "ID and OD, and the gap between the two races is half the ball diameter. "
+    "Must be smaller than the ring wall, (OD - ID) / 2, and than the height.",
+    "NumBalls": "How many balls (and cage pockets) are spaced evenly around the bearing. "
+    "The maximum depends on the ball size and the pitch diameter.",
+}
+DEFAULT_NUM_BALLS = 10
+# Cage defaults from deep-groove-bb.FCStd
+CAGE_DEFAULTS = {
+    "CageThickness": 1.5,
+    "CageTopOffset": 0.5,
+    "PocketClearance": 0.35,
+    "PocketRise": 0.6,
+}
+CAGE_DOCS = {
+    "CageThickness": "Radial thickness of the cage ring. It sits in the gap between the races, "
+    "so it must be thinner than half the ball diameter; what is left over is "
+    "running clearance on each side.",
+    "CageTopOffset": "Sets how tall the cage is. As designed, the cage reaches from the races' "
+    "face to this distance short of where the race grooves meet the ball. "
+    "Larger value = shorter cage.",
+    "PocketClearance": "Extra diameter given to each ball pocket so the balls turn freely. "
+    "Pocket diameter = ball diameter + this value.",
+    "PocketRise": "How far each pocket circle reaches past the cage's open edge. A smaller value "
+    "makes the pocket mouth narrower than the ball, so the balls snap in and are "
+    "held. The cage is drawn seated: moved along the axis until the pockets are "
+    "centered on the balls.",
+}
+UI_HELP = {
+    "Races": "Use existing races: groove a ring you have already modelled. The selected edge must "
+    "be on its inner or outer diameter, and ID, OD and height are measured from it.\n"
+    "Create races: build a new ring from the sizes below. The selected edge (or the "
+    "origin, if nothing is selected) sets the bearing's position and axis.",
+    "EdgeIs": "Is the edge you picked the bearing's inner diameter (e.g. the end of a shaft) or its "
+    "outer diameter (e.g. a housing bore)? That diameter is taken from the edge and locked.",
+    "Reverse": "Build the bearing on the other side of the selected edge (or of the XY plane).",
+    "Cage": "Snap-in cage that sits in the gap between the races and keeps the balls evenly "
+    "spaced. Built as a separate 'Cage' body. Untick to leave it out.",
+    "Balls": "Also model the balls, as a separate 'Balls' body, sized and spaced from the "
+    "values above.",
+}
+
+
+def wrapped(text, width=50):
+    """Break help text into short lines so tooltips stay narrow."""
+    return "\n".join(textwrap.fill(para, width) for para in text.split("\n"))
+
+
+# ---------------------------------------------------------------- geometry helpers
+
+
+def center_of(circle):
+    """Circle center (`Center` is deprecated in newer FreeCAD in favour of `Location`)."""
+    return App.Vector(circle.Location if hasattr(circle, "Location") else circle.Center)
+
+
+def global_placement(obj):
+    """Placement of `obj` in document coordinates, through its parent containers."""
+    pl = obj.Placement
+    parent = obj.getParentGeoFeatureGroup()
+    while parent:
+        pl = parent.Placement.multiply(pl)
+        parent = parent.getParentGeoFeatureGroup()
+    return pl
+
+
+def find_body(feature):
+    """Return the PartDesign Body the selected feature belongs to, or None."""
+    if feature.TypeId == "PartDesign::Body":
+        return feature
+    parent = feature.getParentGeoFeatureGroup()
+    if parent and parent.TypeId == "PartDesign::Body":
+        return parent
+    return None
+
+
+def frame_placement(edge, axial_offset=0.0):
+    """Global placement with X radial (through the edge), Z along the edge's axis,
+    origin on the axis shifted `axial_offset` from the edge's plane."""
+    circle = edge.Curve
+    axis = App.Vector(circle.Axis).normalize()
+    origin = center_of(circle) + axis * axial_offset
+
+    # Radial direction: from the center to a point on the edge, with any axial part removed
+    radial = edge.valueAt(edge.FirstParameter) - center_of(circle)
+    radial = radial - axis * radial.dot(axis)
+    radial.normalize()
+    y = axis.cross(radial)
+
+    return App.Placement(
+        App.Matrix(
+            radial.x,
+            y.x,
+            axis.x,
+            origin.x,
+            radial.y,
+            y.y,
+            axis.y,
+            origin.y,
+            radial.z,
+            y.z,
+            axis.z,
+            origin.z,
+            0,
+            0,
+            0,
+            1,
+        )
+    )
+
+
+def measure_ring(body, edge):
+    """Measure the ring blank the edge belongs to.
+
+    `edge` is in document coordinates. Returns ID, OD, height, the axial offset of
+    mid-height from the edge's plane, and whether the edge is on the inner diameter.
+    """
+    # body.Shape includes the body's own placement but not its containers' (App::Part),
+    # so bring the edge into the body's container coordinates first
+    container = global_placement(body).multiply(body.Placement.inverse())
+    edge = edge.copy()
+    edge.transformShape(container.inverse().toMatrix())
+
+    circle = edge.Curve
+    center = center_of(circle)
+    axis = App.Vector(circle.Axis).normalize()
+
+    solid = min(body.Shape.Solids, key=lambda s: s.distToShape(edge)[0])
+
+    radii = []
+    for face in solid.Faces:
+        surf = face.Surface
+        if not isinstance(surf, Part.Cylinder):
+            continue
+        if abs(abs(App.Vector(surf.Axis).normalize().dot(axis)) - 1) > TOL:
+            continue
+        offset = center_of(surf) - center
+        if (offset - axis * offset.dot(axis)).Length > 1e-4:
+            continue  # parallel but not on the bearing axis
+        radii.append(surf.Radius)
+
+    if not radii or max(radii) - min(radii) < TOL:
+        raise ValueError(
+            "Could not find both the inner and outer diameter faces of the ring."
+        )
+    r_in, r_out = min(radii), max(radii)
+
+    if abs(circle.Radius - r_in) < 1e-4:
+        is_inner = True
+    elif abs(circle.Radius - r_out) < 1e-4:
+        is_inner = False
+    else:
+        raise ValueError(
+            "Selected edge (Ø%.2f) is on neither the inner (Ø%.2f) nor the outer (Ø%.2f) diameter."
+            % (2 * circle.Radius, 2 * r_in, 2 * r_out)
+        )
+
+    heights = [(v.Point - center).dot(axis) for v in solid.Vertexes]
+    return {
+        "id": 2 * r_in,
+        "od": 2 * r_out,
+        "height": max(heights) - min(heights),
+        "mid": (max(heights) + min(heights)) / 2,
+        "is_inner": is_inner,
+    }
+
+
+def origin_feature(body, role):
+    return next(f for f in body.Origin.OriginFeatures if f.Role == role)
+
+
+def attach(sketch, target, mode="FlatFace"):
+    prop = "AttachmentSupport" if hasattr(sketch, "AttachmentSupport") else "Support"
+    setattr(sketch, prop, [(target, "")])
+    sketch.MapMode = mode
+
+
+def max_balls(id_, od, ball_dia, clearance=0.0):
+    """Most pockets that fit around the pitch circle without overlapping."""
+    ratio = (ball_dia + clearance) / ((id_ + od) / 2)
+    return int(math.pi / math.asin(ratio)) if ratio < 1 else 0
+
+
+def validate(v, cage=False, balls=False):
+    id_, od, height, ball = v["ID"], v["OD"], v["Height"], v["BallDiameter"]
+    for name, label in (
+        ("ID", "Inner diameter"),
+        ("Height", "Height"),
+        ("BallDiameter", "Ball diameter"),
+    ):
+        if v[name] <= 0:
+            raise ValueError("%s must be greater than 0." % label)
+    if od <= id_:
+        raise ValueError("Outer diameter must be larger than the inner diameter.")
+    if ball >= (od - id_) / 2:
+        raise ValueError(
+            "Ball diameter Ø%.2f must be smaller than the ring wall (%.2f)."
+            % (ball, (od - id_) / 2)
+        )
+    if ball >= height:
+        raise ValueError(
+            "Ball diameter Ø%.2f must be smaller than the height (%.2f)."
+            % (ball, height)
+        )
+    if balls or cage:
+        clearance = v["PocketClearance"] if cage else 0.0
+        n = max_balls(id_, od, ball, clearance)
+        if not 1 <= v.get("NumBalls", DEFAULT_NUM_BALLS) <= n:
+            raise ValueError(
+                "Number of balls must be between 1 and %d for these sizes." % n
+            )
+    if not cage:
+        return
+    if v["CageThickness"] <= 0:
+        raise ValueError("Cage thickness must be greater than 0.")
+    if v["CageThickness"] >= ball / 2:
+        raise ValueError(
+            "Cage thickness %.2f must be smaller than the slot between the races (%.2f)."
+            % (v["CageThickness"], ball / 2)
+        )
+    if ball * SIN60 / 2 - v["CageTopOffset"] <= -height / 2:
+        raise ValueError("Cage top offset %.2f leaves no cage." % v["CageTopOffset"])
+
+
+# ---------------------------------------------------------------- features
+
+
+def make_params(body, values, placement, measured=False):
+    """BearingParameters datum inside the races Body: the bearing frame + all parameters.
+
+    `placement` is in body coordinates (origin on the axis at mid-height, Z = axis).
+    """
+    lcs = body.newObject("PartDesign::CoordinateSystem", PARAMS)
+    lcs.MapMode = "Deactivated"
+    lcs.Placement = placement
+    for name, doc_str in BEARING_DOCS.items():
+        is_measured = measured and name in ("ID", "OD", "Height")
+        if is_measured:
+            doc_str += " (measured from the existing races)"
+        kind = "App::PropertyInteger" if name == "NumBalls" else "App::PropertyLength"
+        lcs.addProperty(kind, name, "Bearing", wrapped(doc_str))
+        setattr(
+            lcs,
+            name,
+            values.get(name, DEFAULT_NUM_BALLS) if name == "NumBalls" else values[name],
+        )
+        if is_measured:
+            lcs.setEditorMode(name, ["ReadOnly"])
+    for name, default in CAGE_DEFAULTS.items():
+        lcs.addProperty("App::PropertyLength", name, "Cage", wrapped(CAGE_DOCS[name]))
+        setattr(lcs, name, values.get(name, default))
+    lcs.Visibility = False
+    return lcs
+
+
+def values_of(params):
+    names = tuple(BEARING_DOCS) + tuple(CAGE_DEFAULTS)
+    return {
+        n: getattr(params, n).Value if n != "NumBalls" else params.NumBalls
+        for n in names
+    }
+
+
+def draw_race_profile(sketch, pitch_dia, height, ball_dia):
+    """Ball circle + slot through the full height, as in deep-groove-bb.FCStd.
+
+    Origin at mid-height on the axis. Driving constraints are named
+    PitchRadius, BallDiameter, SlotWidth, Height.
+    """
+    V = App.Vector
+    Z = V(0, 0, 1)
+    rp = pitch_dia / 2  # pitch radius (ball center)
+    rb = ball_dia / 2  # ball radius
+    w = ball_dia / 4  # half slot width (slot = ball diameter / 2)
+    h = height / 2
+    yi = rb * SIN60  # where the slot walls meet the ball circle
+    phi = math.atan2(yi, w)
+
+    def line(x1, y1, x2, y2):
+        return sketch.addGeometry(Part.LineSegment(V(x1, y1, 0), V(x2, y2, 0)))
+
+    def arc(a1, a2):
+        return sketch.addGeometry(
+            Part.ArcOfCircle(Part.Circle(V(rp, 0, 0), Z, rb), a1, a2)
+        )
+
+    ball = sketch.addGeometry(Part.Circle(V(rp, 0, 0), Z, rb), True)
+    l1 = line(rp - w, -yi, rp - w, -h)  # bottom slot, inner wall
+    l2 = line(rp - w, -h, rp + w, -h)  # bottom face
+    l3 = line(rp + w, -h, rp + w, -yi)  # bottom slot, outer wall
+    l4 = line(rp - w, yi, rp - w, h)  # top slot, inner wall
+    l5 = line(rp - w, h, rp + w, h)  # top face
+    l6 = line(rp + w, h, rp + w, yi)  # top slot, outer wall
+    a_in = arc(math.pi - phi, math.pi + phi)  # ball arc into the inner race
+    a_out = arc(-phi, phi)  # ball arc into the outer race
+
+    C = Sketcher.Constraint
+    named = {
+        "PitchRadius": C("DistanceX", -1, 1, ball, 3, rp),
+        "BallDiameter": C("Diameter", ball, ball_dia),
+        "SlotWidth": C("DistanceX", l2, 1, l2, 2, 2 * w),
+        "Height": C("DistanceY", l2, 1, l5, 1, height),
+    }
+    for name, con in named.items():
+        sketch.renameConstraint(sketch.addConstraint(con), name)
+
+    sketch.addConstraint(
+        [
+            # Ball center on the mid-height line
+            C("PointOnObject", ball, 3, -1),
+            # Ball arcs follow the ball circle
+            C("Coincident", a_in, 3, ball, 3),
+            C("Coincident", a_out, 3, ball, 3),
+            C("Equal", a_in, ball),
+            C("Equal", a_out, ball),
+            # Closed outline
+            C("Coincident", l1, 2, l2, 1),
+            C("Coincident", l2, 2, l3, 1),
+            C("Coincident", l4, 2, l5, 1),
+            C("Coincident", l5, 2, l6, 1),
+            C("Coincident", a_in, 1, l4, 1),
+            C("Coincident", a_in, 2, l1, 1),
+            C("Coincident", a_out, 1, l3, 2),
+            C("Coincident", a_out, 2, l6, 2),
+            C("Vertical", l1),
+            C("Vertical", l3),
+            C("Vertical", l4),
+            C("Vertical", l6),
+            C("Horizontal", l2),
+            C("Horizontal", l5),
+            # Slot centered on the ball
+            C("Equal", l2, l5),
+            C("Vertical", l2, 1, l5, 1),
+            C("Symmetric", l2, 1, l5, 2, ball, 3),
+        ]
+    )
+
+
+def make_groove(body, params):
+    """Groove the race profile around the bearing axis, on the datum's XZ plane."""
+    v = values_of(params)
+    p = params.Name
+    sketch = body.newObject("Sketcher::SketchObject", "BearingSketch")
+    attach(sketch, params, "ObjectXZ")
+    draw_race_profile(sketch, (v["ID"] + v["OD"]) / 2, v["Height"], v["BallDiameter"])
+    for name, expr in (
+        ("PitchRadius", "(%s.ID + %s.OD) / 4" % (p, p)),
+        ("BallDiameter", p + ".BallDiameter"),
+        ("SlotWidth", p + ".BallDiameter / 2"),
+        ("Height", p + ".Height"),
+    ):
+        sketch.setExpression(".Constraints." + name, expr)
+
+    groove = body.newObject("PartDesign::Groove", "BearingGroove")
+    groove.Profile = sketch
+    groove.ReferenceAxis = (sketch, ["V_Axis"])
+    groove.Angle = 360.0
+    sketch.Visibility = False
+    return groove
+
+
+def make_cage(doc, races, params):
+    """Snap-in cage between the races, in its own Body that follows the bearing frame."""
+    v = values_of(params)
+    p = params.Name
+    rp = (v["ID"] + v["OD"]) / 4
+    t = v["CageThickness"]
+    pocket_d = v["BallDiameter"] + v["PocketClearance"]
+    # Cage as designed: bottom face .. CageTopOffset below where the slot meets the ball,
+    # with the pocket rising PocketRise above its top. Seated, it shifts along the axis
+    # so the pocket center lands on the ball center (y = 0).
+    design_top = v["BallDiameter"] * SIN60 / 2 - v["CageTopOffset"]
+    top = pocket_d / 2 - v["PocketRise"]
+    bottom = -v["Height"] / 2 + (top - design_top)
+
+    body = doc.addObject("PartDesign::Body", "Cage")
+    follow_bearing(body, races, params)
+
+    # Cage ring cross-section on XZ: X radial, Y = bearing axis
+    V = App.Vector
+    C = Sketcher.Constraint
+    ring = body.newObject("Sketcher::SketchObject", "CageSketch")
+    attach(ring, origin_feature(body, "XZ_Plane"))
+    pts = [
+        V(rp - t / 2, bottom, 0),
+        V(rp + t / 2, bottom, 0),
+        V(rp + t / 2, top, 0),
+        V(rp - t / 2, top, 0),
+    ]
+    lines = [
+        ring.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4])) for i in range(4)
+    ]
+    ring.addConstraint(
+        [C("Coincident", lines[i], 2, lines[(i + 1) % 4], 1) for i in range(4)]
+        + [
+            C("Horizontal", lines[0]),
+            C("Horizontal", lines[2]),
+            C("Vertical", lines[1]),
+            C("Vertical", lines[3]),
+        ]
+    )
+    design_top_expr = "(%s.BallDiameter * sqrt(3) / 4 - %s.CageTopOffset)" % (p, p)
+    top_expr = "(%s.BallDiameter + %s.PocketClearance) / 2 - %s.PocketRise" % (p, p, p)
+    for name, con, expr in (
+        (
+            "CageInner",
+            C("DistanceX", -1, 1, lines[0], 1, rp - t / 2),
+            "(%s.ID + %s.OD) / 4 - %s.CageThickness / 2" % (p, p, p),
+        ),
+        (
+            "CageThickness",
+            C("DistanceX", lines[0], 1, lines[0], 2, t),
+            p + ".CageThickness",
+        ),
+        (
+            "CageBottom",
+            C("DistanceY", -1, 1, lines[0], 1, bottom),
+            "-%s.Height / 2 + (%s) - %s" % (p, top_expr, design_top_expr),
+        ),
+        ("CageTop", C("DistanceY", -1, 1, lines[2], 1, top), top_expr),
+    ):
+        ring.renameConstraint(ring.addConstraint(con), name)
+        ring.setExpression(".Constraints." + name, expr)
+
+    rev = body.newObject("PartDesign::Revolution", "CageRing")
+    rev.Profile = ring
+    rev.ReferenceAxis = (ring, ["V_Axis"])
+    rev.Angle = 360.0
+    ring.Visibility = False
+
+    # Ball pocket on YZ (normal = radial X), cut outward through the cage at +X
+    pk = body.newObject("Sketcher::SketchObject", "PocketSketch")
+    attach(pk, origin_feature(body, "YZ_Plane"))
+    circle = pk.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), pocket_d / 2))
+    pk.addConstraint(
+        C("Coincident", circle, 3, -1, 1)
+    )  # centered on the ball (seated cage)
+    c = pk.addConstraint(C("Diameter", circle, pocket_d))
+    pk.renameConstraint(c, "PocketDiameter")
+    pk.setExpression(
+        ".Constraints.PocketDiameter", "%s.BallDiameter + %s.PocketClearance" % (p, p)
+    )
+
+    pocket = body.newObject("PartDesign::Pocket", "BallPocket")
+    pocket.Profile = pk
+    pocket.Type = "ThroughAll"
+    pocket.Reversed = True  # cut toward +X only, so a single pocket per ball
+    pk.Visibility = False
+
+    pattern = body.newObject("PartDesign::PolarPattern", "BallPockets")
+    pattern.Originals = [pocket]
+    pattern.Axis = (origin_feature(body, "Z_Axis"), [""])
+    pattern.Angle = 360.0
+    pattern.setExpression("Occurrences", p + ".NumBalls")
+    body.Tip = pattern  # patterns don't become the tip on their own
+    return body
+
+
+def follow_bearing(body, races, params):
+    """Make `body` follow the bearing frame (races Body placement x datum placement).
+
+    The body goes in the same container (e.g. App::Part) as the races, since the
+    placements are relative to it.
+    """
+    container = races.getParentGeoFeatureGroup()
+    if container:
+        container.addObject(body)
+    body.Placement = races.Placement.multiply(params.Placement)
+    body.setExpression(
+        "Placement", "%s.Placement * %s.Placement" % (races.Name, params.Name)
+    )
+
+
+def make_balls(doc, races, params):
+    """One sphere at the pitch diameter, mid-height, patterned NumBalls times, in its own Body."""
+    v = values_of(params)
+    p = params.Name
+    body = doc.addObject("PartDesign::Body", "Balls")
+    follow_bearing(body, races, params)
+
+    ball = body.newObject("PartDesign::AdditiveSphere", "Ball")
+    attach(ball, origin_feature(body, "XY_Plane"))
+    ball.Radius = v["BallDiameter"] / 2
+    ball.setExpression("Radius", p + ".BallDiameter / 2")
+    ball.AttachmentOffset = App.Placement(
+        App.Vector((v["ID"] + v["OD"]) / 4, 0, 0), App.Rotation()
+    )
+    ball.setExpression(".AttachmentOffset.Base.x", "(%s.ID + %s.OD) / 4" % (p, p))
+
+    pattern = body.newObject("PartDesign::PolarPattern", "BallPattern")
+    pattern.Originals = [ball]
+    pattern.Axis = (origin_feature(body, "Z_Axis"), [""])
+    pattern.Angle = 360.0
+    pattern.setExpression("Occurrences", p + ".NumBalls")
+    body.Tip = pattern  # patterns don't become the tip on their own
+    return body
+
+
+def check(doc, *features):
+    doc.recompute()
+    for f in features:
+        if not f.isValid():
+            raise RuntimeError("%s failed: %s" % (f.Label, f.getStatusString()))
+
+
+def groove_existing_races(feature, edge, values, cage=True, balls=False):
+    """Groove a ring blank the user already modelled. `edge` must be in global coordinates."""
+    doc = feature.Document
+    body = find_body(feature)
+    if body is None:
+        raise ValueError(
+            "To use existing races, the selected edge must belong to a PartDesign Body."
+        )
+    ring = measure_ring(body, edge)
+    values = dict(values, ID=ring["id"], OD=ring["od"], Height=ring["height"])
+    validate(values, cage, balls)
+
+    # Bearing frame (on the axis at mid-height), in the races body's coordinates
+    frame = (
+        global_placement(body).inverse().multiply(frame_placement(edge, ring["mid"]))
+    )
+    params = make_params(body, values, frame, measured=True)
+
+    feats = [make_groove(body, params)]
+    if cage:
+        feats.append(make_cage(doc, body, params).Tip)
+    if balls:
+        feats.append(make_balls(doc, body, params).Tip)
+    check(doc, *feats)
+    return params
+
+
+def create_races(doc, placement, values, reverse=False, cage=True, balls=False):
+    """Build a parametric ring blank, then groove it into two races.
+
+    `placement` is the global frame of the bearing: Z = axis, origin = one face center.
+    The ring is padded along +Z (or -Z when `reverse`).
+    """
+    validate(values, cage, balls)
+    body = doc.addObject("PartDesign::Body", "Bearing")
+    body.Placement = placement
+
+    # Datum at mid-height; it follows Height so the frame stays centered
+    params = make_params(
+        body,
+        values,
+        App.Placement(
+            App.Vector(0, 0, (-0.5 if reverse else 0.5) * values["Height"]),
+            App.Rotation(),
+        ),
+    )
+    params.setExpression(".Placement.Base.z", "%sHeight / 2" % ("-" if reverse else ""))
+    p = params.Name
+
+    # Ring blank: two circles padded to the bearing height
+    ring = body.newObject("Sketcher::SketchObject", "RingSketch")
+    attach(ring, origin_feature(body, "XY_Plane"))
+    for name in ("ID", "OD"):
+        g = ring.addGeometry(
+            Part.Circle(App.Vector(), App.Vector(0, 0, 1), values[name] / 2)
+        )
+        ring.addConstraint(Sketcher.Constraint("Coincident", g, 3, -1, 1))
+        ring.renameConstraint(
+            ring.addConstraint(Sketcher.Constraint("Diameter", g, values[name])), name
+        )
+        ring.setExpression(".Constraints." + name, "%s.%s" % (p, name))
+
+    pad = body.newObject("PartDesign::Pad", "Blank")
+    pad.Profile = ring
+    pad.Reversed = reverse
+    pad.setExpression("Length", p + ".Height")
+    ring.Visibility = False
+
+    feats = [make_groove(body, params)]
+    if cage:
+        feats.append(make_cage(doc, body, params).Tip)
+    if balls:
+        feats.append(make_balls(doc, body, params).Tip)
+    check(doc, *feats)
+    return params
+
+
+# ---------------------------------------------------------------- GUI
+
+
+def get_selected_edge():
+    """Return (feature, global edge) for a single selected circular edge, None if nothing is selected."""
+    import FreeCADGui as Gui
+
+    # Resolve mode 0 gives the full selection path, so we can get the edge in global coordinates
+    sel = Gui.Selection.getSelectionEx("", 0)
+    if not sel:
+        return None
+    if len(sel) != 1 or len(sel[0].SubElementNames) != 1:
+        raise ValueError(
+            "Select exactly one circular edge (or nothing, to create races at the origin)."
+        )
+
+    top, subname = sel[0].Object, sel[0].SubElementNames[0]
+    if not subname.split(".")[-1].startswith("Edge"):
+        raise ValueError("The selection must be an edge.")
+
+    edge = Part.getShape(top, subname, needSubElement=True)
+    if not isinstance(edge.Curve, Part.Circle):
+        raise ValueError("The selected edge is not circular.")
+
+    path = subname[: subname.rfind(".") + 1]
+    feature = top.getSubObject(path, retType=1) if path else top
+    return feature, edge
+
+
+class BearingDialog:
+    """One dialog for both modes."""
+
+    def __init__(self, edge, ring):
+        import FreeCADGui as Gui
+        from PySide import QtGui
+
+        self.edge, self.ring = edge, ring
+        self.edge_dia = 2 * edge.Curve.Radius if edge else None
+
+        self.dlg = QtGui.QDialog(Gui.getMainWindow())
+        self.dlg.setWindowTitle("Deep Groove Ball Bearing")
+        form = QtGui.QFormLayout(self.dlg)
+
+        def row(layout, label, widget, help_text):
+            """Add a form row whose label and field both carry the help text as a tooltip."""
+            help_text = wrapped(help_text)
+            widget.setToolTip(help_text)
+            if label is None:
+                layout.addRow(widget)
+                return
+            lbl = QtGui.QLabel(label)
+            lbl.setToolTip(help_text)
+            layout.addRow(lbl, widget)
+
+        def spin(value, prefix="Ø "):
+            s = QtGui.QDoubleSpinBox()
+            s.setDecimals(2)
+            s.setSingleStep(0.01)  # arrow keys / buttons step by the last shown digit
+            s.setAccelerated(True)  # holding an arrow speeds up
+            s.setRange(0.0, 10000)
+            s.setPrefix(prefix)
+            s.setSuffix(" mm")
+            s.setValue(value)
+            return s
+
+        self.mode = QtGui.QComboBox()
+        if ring:
+            self.mode.addItem(EXISTING)
+        self.mode.addItem(CREATE)
+        row(form, "Races:", self.mode, UI_HELP["Races"])
+
+        self.edge_is = QtGui.QComboBox()
+        self.edge_is.addItems(["Inner diameter", "Outer diameter"])
+        if edge:
+            row(
+                form,
+                "Selected edge (Ø %.2f) is:" % self.edge_dia,
+                self.edge_is,
+                UI_HELP["EdgeIs"],
+            )
+
+        d = self.edge_dia or 20.0
+        self.id_ = spin(d)
+        self.od = spin(round(d * 1.6, 2))
+        self.height = spin(round(d * 0.4, 2), prefix="")
+        row(form, "Inner diameter:", self.id_, BEARING_DOCS["ID"])
+        row(form, "Outer diameter:", self.od, BEARING_DOCS["OD"])
+        row(form, "Height:", self.height, BEARING_DOCS["Height"])
+
+        self.reverse = QtGui.QCheckBox("Reverse direction")
+        row(form, "", self.reverse, UI_HELP["Reverse"])
+
+        self.ball = spin(4.0)
+        row(form, "Ball diameter:", self.ball, BEARING_DOCS["BallDiameter"])
+        self.num_balls = QtGui.QSpinBox()
+        self.num_balls.setRange(1, 1000)
+        self.num_balls.setValue(DEFAULT_NUM_BALLS)
+        row(form, "Number of balls:", self.num_balls, BEARING_DOCS["NumBalls"])
+
+        # Cage options (checkable group = "create cage")
+        self.cage = QtGui.QGroupBox("Cage")
+        self.cage.setCheckable(True)
+        self.cage.setChecked(True)
+        cform = QtGui.QFormLayout(self.cage)
+        self.cage_t = spin(CAGE_DEFAULTS["CageThickness"], prefix="")
+        self.cage_top = spin(CAGE_DEFAULTS["CageTopOffset"], prefix="")
+        self.pocket_clr = spin(CAGE_DEFAULTS["PocketClearance"], prefix="")
+        self.pocket_rise = spin(CAGE_DEFAULTS["PocketRise"], prefix="")
+        row(cform, "Cage thickness:", self.cage_t, CAGE_DOCS["CageThickness"])
+        row(cform, "Cage top offset:", self.cage_top, CAGE_DOCS["CageTopOffset"])
+        row(cform, "Pocket clearance:", self.pocket_clr, CAGE_DOCS["PocketClearance"])
+        row(cform, "Pocket rise:", self.pocket_rise, CAGE_DOCS["PocketRise"])
+        row(form, None, self.cage, UI_HELP["Cage"])
+
+        self.balls = QtGui.QCheckBox("Create balls")
+        self.balls.setChecked(False)
+        row(form, "Balls:", self.balls, UI_HELP["Balls"])
+
+        buttons = QtGui.QDialogButtonBox(
+            QtGui.QDialogButtonBox.Ok | QtGui.QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.dlg.reject)
+        form.addRow(buttons)
+
+        self.mode.currentIndexChanged.connect(self.refresh)
+        self.edge_is.currentIndexChanged.connect(self.refresh)
+        self.refresh()
+
+        # Defaults sized to this bearing (for 20/32 they match deep-groove-bb.FCStd: Ø4, 1.5, 10)
+        wall = (self.od.value() - self.id_.value()) / 2
+        self.ball.setValue(round(wall * 2 / 3, 2))
+        self.cage_t.setValue(round(self.ball.value() * 0.375, 2))
+        n = max_balls(
+            self.id_.value(),
+            self.od.value(),
+            self.ball.value(),
+            CAGE_DEFAULTS["PocketClearance"],
+        )
+        self.num_balls.setValue(max(1, min(DEFAULT_NUM_BALLS, n)))
+
+    def refresh(self, *_):
+        existing = self.mode.currentText() == EXISTING
+        self.edge_is.setEnabled(not existing)
+        self.reverse.setEnabled(not existing)
+
+        if existing:
+            # Everything is measured from the blank
+            r = self.ring
+            self.edge_is.setCurrentIndex(0 if r["is_inner"] else 1)
+            for s, v in (
+                (self.id_, r["id"]),
+                (self.od, r["od"]),
+                (self.height, r["height"]),
+            ):
+                s.setValue(v)
+                s.setEnabled(False)
+        else:
+            self.height.setEnabled(True)
+            inner = self.edge_is.currentIndex() == 0
+            locked, other = (self.id_, self.od) if inner else (self.od, self.id_)
+            other.setEnabled(True)
+            if self.edge:
+                # The selected edge fixes one diameter
+                locked.setValue(self.edge_dia)
+                locked.setEnabled(False)
+                if inner and self.od.value() <= self.edge_dia:
+                    self.od.setValue(round(self.edge_dia * 1.6, 2))
+                if not inner and self.id_.value() >= self.edge_dia:
+                    self.id_.setValue(round(self.edge_dia / 1.6, 2))
+            else:
+                locked.setEnabled(True)
+
+        if self.ball.value() >= (self.od.value() - self.id_.value()) / 2:
+            self.ball.setValue(round((self.od.value() - self.id_.value()) / 3, 2))
+
+    def accept(self):
+        """Check the values first; on a problem, say so and keep the dialog open."""
+        from PySide import QtGui
+
+        o = self.options()
+        try:
+            validate(o["values"], o["cage"], o["balls"])
+        except ValueError as e:
+            QtGui.QMessageBox.warning(self.dlg, "Deep Groove Ball Bearing", str(e))
+            return
+        self.dlg.accept()
+
+    def exec_(self):
+        return self.options() if self.dlg.exec_() else None
+
+    def options(self):
+        return {
+            "mode": self.mode.currentText(),
+            "is_inner": self.edge_is.currentIndex() == 0,
+            "reverse": self.reverse.isChecked(),
+            "cage": self.cage.isChecked(),
+            "balls": self.balls.isChecked(),
+            "values": {
+                "ID": self.id_.value(),
+                "OD": self.od.value(),
+                "Height": self.height.value(),
+                "BallDiameter": self.ball.value(),
+                "NumBalls": self.num_balls.value(),
+                "CageThickness": self.cage_t.value(),
+                "CageTopOffset": self.cage_top.value(),
+                "PocketClearance": self.pocket_clr.value(),
+                "PocketRise": self.pocket_rise.value(),
+            },
+        }
+
+
+def run_gui():
+    import FreeCADGui as Gui
+    from PySide import QtGui
+
+    def fail(msg):
+        App.Console.PrintError(msg + "\n")
+        QtGui.QMessageBox.warning(Gui.getMainWindow(), "Deep Groove Ball Bearing", msg)
+
+    try:
+        picked = get_selected_edge()
+    except ValueError as e:
+        return fail(str(e))
+    feature, edge = picked if picked else (None, None)
+
+    # Offer "existing races" only when the edge is on a ring blank we can measure
+    ring = None
+    body = find_body(feature) if feature is not None else None
+    if body is not None:
+        try:
+            ring = measure_ring(body, edge)
+        except ValueError:
+            ring = None
+
+    opts = BearingDialog(edge, ring).exec_()
+    if opts is None:
+        return
+
+    doc = (
+        feature.Document
+        if feature
+        else (App.ActiveDocument or App.newDocument("Bearing"))
+    )
+    doc.openTransaction("Deep groove ball bearing")
+    try:
+        if opts["mode"] == EXISTING:
+            groove_existing_races(
+                feature, edge, opts["values"], opts["cage"], opts["balls"]
+            )
+        else:
+            placement = frame_placement(edge) if edge else App.Placement()
+            create_races(
+                doc,
+                placement,
+                opts["values"],
+                opts["reverse"],
+                opts["cage"],
+                opts["balls"],
+            )
+    except Exception as e:
+        doc.abortTransaction()
+        return fail(str(e))
+    doc.commitTransaction()
+    if Gui.ActiveDocument:
+        Gui.SendMsgToActiveView("ViewFit")
+
+
+if App.GuiUp:
+    run_gui()
