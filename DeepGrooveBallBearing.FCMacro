@@ -4,11 +4,14 @@
 # Usage:
 #   1. Select a circular edge, or nothing at all.
 #   2. Run the macro and choose how to get the races:
-#      - "Use existing races": the edge must be on the inner or outer diameter of a
-#        ring blank in a PartDesign Body. ID, OD and height are measured from it.
-#      - "Create races": the edge (on anything, e.g. a shaft or a housing bore) sets
-#        the bearing's position, axis and either its ID or its OD. With nothing
-#        selected, the races are created at the origin on the Z axis.
+#      - "Groove selected body": the ball groove is cut into the PartDesign Body the edge
+#        belongs to, and the body itself becomes the races. On a bore, the bore is the
+#        bearing's ID: a thin inner race is split off and the rest of the body is the
+#        outer race (with the ball groove). On an outer surface it is the other way
+#        round. A plain ring simply becomes the inner and outer race.
+#      - "Create races": a new ring with both races is built. The edge (on anything,
+#        e.g. a shaft or a housing bore) sets the bearing's position, axis and either
+#        its ID or its OD. With nothing selected, it is created at the origin on Z.
 #   3. Enter the ball diameter, number of balls and the cage/ball options. A sketch is
 #      created in a plane containing the bearing axis, and one PartDesign Groove cuts it
 #      around that axis, splitting the blank into the (disconnected) inner and outer races.
@@ -17,7 +20,8 @@
 #
 # Parameters live on a "BearingParameters" datum coordinate system inside the races
 # Body (one per bearing). Select it in the tree to edit:
-#   Bearing: ID, OD, Height, BallDiameter, NumBalls  (ID/OD/Height are read-only when measured)
+#   Bearing: ID, OD, Height, BallDiameter, NumBalls  (the edge's diameter is read-only
+#            when grooving the selected body)
 #   Cage:    CageThickness, CageTopOffset, PocketClearance, PocketRise
 # (They can't sit on the Body itself: FreeCAD forbids a Body's features from
 # referencing the Body's own properties -- "cyclic reference".)
@@ -57,7 +61,7 @@ import Sketcher
 
 TOL = 1e-6
 PARAMS = "BearingParameters"
-EXISTING = "Use existing races"
+GROOVE = "Groove selected body"
 CREATE = "Create races"
 SIN60 = math.sqrt(3) / 2  # slot = ball Ø / 2, so the slot walls meet the ball at 60°
 
@@ -69,11 +73,13 @@ BEARING_DOCS = {
     "grooves are centered in it.",
     "BallDiameter": "Diameter of the balls. The balls run on the pitch diameter, midway between "
     "ID and OD, and the gap between the two races is half the ball diameter. "
-    "Must be smaller than the ring wall, (OD - ID) / 2, and than the height.",
+    "Must be smaller than the ring wall, (OD - ID) / 2, and than the height. "
+    "Default 4 mm (smaller when that doesn't fit the bearing).",
     "NumBalls": "How many balls (and cage pockets) are spaced evenly around the bearing. "
     "The maximum depends on the ball size and the pitch diameter.",
 }
 DEFAULT_NUM_BALLS = 10
+DEFAULT_BALL_DIAMETER = 4.0
 # Cage defaults from deep-groove-bb.FCStd
 CAGE_DEFAULTS = {
     "CageThickness": 1.5,
@@ -83,8 +89,8 @@ CAGE_DEFAULTS = {
 }
 CAGE_DOCS = {
     "CageThickness": "Radial thickness of the cage ring. It sits in the gap between the races, "
-    "so it must be thinner than half the ball diameter; what is left over is "
-    "running clearance on each side.",
+    "which is always half the ball diameter (2 mm for a 4 mm ball), so it can be at most "
+    "that; what is left over is running clearance on each side.",
     "CageTopOffset": "Sets how tall the cage is. As designed, the cage reaches from the races' "
     "face to this distance short of where the race grooves meet the ball. "
     "Larger value = shorter cage.",
@@ -96,12 +102,20 @@ CAGE_DOCS = {
     "centered on the balls.",
 }
 UI_HELP = {
-    "Races": "Use existing races: groove a ring you have already modelled. The selected edge must "
-    "be on its inner or outer diameter, and ID, OD and height are measured from it.\n"
-    "Create races: build a new ring from the sizes below. The selected edge (or the "
-    "origin, if nothing is selected) sets the bearing's position and axis.",
-    "EdgeIs": "Is the edge you picked the bearing's inner diameter (e.g. the end of a shaft) or its "
-    "outer diameter (e.g. a housing bore)? That diameter is taken from the edge and locked.",
+    "Races": "Groove selected body: cut the ball groove into the body the edge belongs to; the "
+    "body itself becomes the races. On a bore, the bore is the bearing's inner diameter: a "
+    "thin inner race is split off and the rest of the body is the outer race. On an outer "
+    "surface it is the other way round. A plain ring becomes the inner and outer race. "
+    "The other diameter and the height set where the groove goes; they are prefilled "
+    "from the body.\n"
+    "Create races: build a new ring with both races from the sizes below. The selected "
+    "edge (e.g. the end of a shaft or a housing bore; the origin if nothing is selected) "
+    "sets the bearing's position and axis.",
+    "EdgeIs": "Is the selected edge the bearing's inner or outer diameter? When grooving the "
+    "selected body this is detected: a bore is the inner diameter, an outer surface the "
+    "outer diameter. When creating races it is preset from the edge (end of a shaft: "
+    "inner; housing bore: outer) and can be changed. That diameter is taken from the "
+    "edge and locked.",
     "Reverse": "Build the bearing on the other side of the selected edge (or of the XY plane).",
     "Cage": "Snap-in cage that sits in the gap between the races and keeps the balls evenly "
     "spaced. Built as a separate 'Cage' body. Untick to leave it out.",
@@ -178,25 +192,12 @@ def frame_placement(edge, axial_offset=0.0):
     )
 
 
-def measure_ring(body, edge):
-    """Measure the ring blank the edge belongs to.
-
-    `edge` is in document coordinates. Returns ID, OD, height, the axial offset of
-    mid-height from the edge's plane, and whether the edge is on the inner diameter.
-    """
-    # body.Shape includes the body's own placement but not its containers' (App::Part),
-    # so bring the edge into the body's container coordinates first
-    container = global_placement(body).multiply(body.Placement.inverse())
-    edge = edge.copy()
-    edge.transformShape(container.inverse().toMatrix())
-
+def coaxial_cylinders(solid, edge):
+    """Cylindrical faces of `solid` on the edge's axis, as (face, radius) pairs."""
     circle = edge.Curve
     center = center_of(circle)
     axis = App.Vector(circle.Axis).normalize()
-
-    solid = min(body.Shape.Solids, key=lambda s: s.distToShape(edge)[0])
-
-    radii = []
+    found = []
     for face in solid.Faces:
         surf = face.Surface
         if not isinstance(surf, Part.Cylinder):
@@ -206,31 +207,77 @@ def measure_ring(body, edge):
         offset = center_of(surf) - center
         if (offset - axis * offset.dot(axis)).Length > 1e-4:
             continue  # parallel but not on the bearing axis
-        radii.append(surf.Radius)
+        found.append((face, surf.Radius))
+    return found
 
-    if not radii or max(radii) - min(radii) < TOL:
-        raise ValueError(
-            "Could not find both the inner and outer diameter faces of the ring."
-        )
-    r_in, r_out = min(radii), max(radii)
 
-    if abs(circle.Radius - r_in) < 1e-4:
-        is_inner = True
-    elif abs(circle.Radius - r_out) < 1e-4:
-        is_inner = False
+def cylinder_side(solid, edge):
+    """Find the cylindrical face the circular edge bounds and which side its material is on.
+
+    Returns (side, lo, hi): side is "outside" for a bore (material radially outside the
+    cylinder) or "inside" for a shaft / outer surface; lo..hi is the face's axial range
+    measured from the edge's plane. (None, 0, 0) if there is no such face.
+    """
+    circle = edge.Curve
+    center = center_of(circle)
+    axis = App.Vector(circle.Axis).normalize()
+    radial = edge.valueAt(edge.FirstParameter) - center
+    radial = radial - axis * radial.dot(axis)
+    radial.normalize()
+    eps = min(0.01, circle.Radius * 0.01)
+
+    for face, radius in coaxial_cylinders(solid, edge):
+        if abs(radius - circle.Radius) > 1e-4:
+            continue
+        heights = [(v.Point - center).dot(axis) for v in face.Vertexes]
+        if min(abs(h) for h in heights) > 1e-4:
+            continue  # same diameter, but not the face this edge belongs to
+        lo, hi = min(heights), max(heights)
+        on_face = center + axis * ((lo + hi) / 2) + radial * circle.Radius
+        outside = solid.isInside(on_face + radial * eps, 1e-7, False)
+        inside = solid.isInside(on_face - radial * eps, 1e-7, False)
+        if outside != inside:
+            return ("outside" if outside else "inside"), lo, hi
+    return None, 0.0, 0.0
+
+
+def nearest_solid(shape, edge):
+    return min(shape.Solids, key=lambda s: s.distToShape(edge)[0])
+
+
+def measure_body(body, edge):
+    """Measure the selected body around the edge, for grooving it into races.
+
+    `edge` is in document coordinates. Returns the edge's diameter, whether it is the
+    bearing's ID (a bore) or OD (an outer surface), the selected cylinder's length and
+    the axial offset of its middle from the edge's plane, and a suggestion for the
+    other diameter (the nearest coaxial cylinder on the material side, or None).
+    """
+    # body.Shape includes the body's own placement but not its containers' (App::Part),
+    # so bring the edge into the body's container coordinates first
+    container = global_placement(body).multiply(body.Placement.inverse())
+    edge = edge.copy()
+    edge.transformShape(container.inverse().toMatrix())
+
+    solid = nearest_solid(body.Shape, edge)
+    side, lo, hi = cylinder_side(solid, edge)
+    if side is None:
+        raise ValueError("Could not find the cylindrical face of the selected edge on the body.")
+    r = edge.Curve.Radius
+    is_inner = side == "outside"  # a bore is the bearing's inner diameter
+    radii = [rad for _, rad in coaxial_cylinders(solid, edge)]
+    if is_inner:
+        others = [rad for rad in radii if rad > r + 1e-4]
+        other = min(others) if others else None
     else:
-        raise ValueError(
-            "Selected edge (Ø%.2f) is on neither the inner (Ø%.2f) nor the outer (Ø%.2f) diameter."
-            % (2 * circle.Radius, 2 * r_in, 2 * r_out)
-        )
-
-    heights = [(v.Point - center).dot(axis) for v in solid.Vertexes]
+        others = [rad for rad in radii if rad < r - 1e-4]
+        other = max(others) if others else None
     return {
-        "id": 2 * r_in,
-        "od": 2 * r_out,
-        "height": max(heights) - min(heights),
-        "mid": (max(heights) + min(heights)) / 2,
+        "dia": 2 * r,
         "is_inner": is_inner,
+        "height": hi - lo,
+        "mid": (lo + hi) / 2,
+        "other": 2 * other if other else None,
     }
 
 
@@ -282,10 +329,10 @@ def validate(v, cage=False, balls=False):
         return
     if v["CageThickness"] <= 0:
         raise ValueError("Cage thickness must be greater than 0.")
-    if v["CageThickness"] >= ball / 2:
+    if v["CageThickness"] > ball / 2 + 1e-9:
         raise ValueError(
-            "Cage thickness %.2f must be smaller than the slot between the races (%.2f)."
-            % (v["CageThickness"], ball / 2)
+            "Cage thickness %.2f can be at most the gap between the races "
+            "(half the ball diameter, %.2f)." % (v["CageThickness"], ball / 2)
         )
     if ball * SIN60 / 2 - v["CageTopOffset"] <= -height / 2:
         raise ValueError("Cage top offset %.2f leaves no cage." % v["CageTopOffset"])
@@ -294,18 +341,18 @@ def validate(v, cage=False, balls=False):
 # ---------------------------------------------------------------- features
 
 
-def make_params(body, values, placement, measured=False):
+def make_params(body, values, placement, readonly=()):
     """BearingParameters datum inside the races Body: the bearing frame + all parameters.
 
     `placement` is in body coordinates (origin on the axis at mid-height, Z = axis).
+    Names in `readonly` (the diameter taken from the selected edge) can't be edited.
     """
     lcs = body.newObject("PartDesign::CoordinateSystem", PARAMS)
     lcs.MapMode = "Deactivated"
     lcs.Placement = placement
     for name, doc_str in BEARING_DOCS.items():
-        is_measured = measured and name in ("ID", "OD", "Height")
-        if is_measured:
-            doc_str += " (measured from the existing races)"
+        if name in readonly:
+            doc_str += " (taken from the selected edge)"
         kind = "App::PropertyInteger" if name == "NumBalls" else "App::PropertyLength"
         lcs.addProperty(kind, name, "Bearing", wrapped(doc_str))
         setattr(
@@ -313,7 +360,7 @@ def make_params(body, values, placement, measured=False):
             name,
             values.get(name, DEFAULT_NUM_BALLS) if name == "NumBalls" else values[name],
         )
-        if is_measured:
+        if name in readonly:
             lcs.setEditorMode(name, ["ReadOnly"])
     for name, default in CAGE_DEFAULTS.items():
         lcs.addProperty("App::PropertyLength", name, "Cage", wrapped(CAGE_DOCS[name]))
@@ -572,23 +619,27 @@ def check(doc, *features):
             raise RuntimeError("%s failed: %s" % (f.Label, f.getStatusString()))
 
 
-def groove_existing_races(feature, edge, values, cage=True, balls=False):
-    """Groove a ring blank the user already modelled. `edge` must be in global coordinates."""
+def groove_body(feature, edge, values, cage=True, balls=False):
+    """Groove the body the edge belongs to, so the body itself becomes the races.
+
+    The edge's diameter (ID on a bore, OD on an outer surface) replaces the one in
+    `values`; the other diameter and Height in `values` set where the groove goes,
+    centered on the selected cylinder. `edge` must be in global coordinates.
+    """
     doc = feature.Document
     body = find_body(feature)
     if body is None:
         raise ValueError(
-            "To use existing races, the selected edge must belong to a PartDesign Body."
+            "To groove the selected body, the edge must belong to a PartDesign Body."
         )
-    ring = measure_ring(body, edge)
-    values = dict(values, ID=ring["id"], OD=ring["od"], Height=ring["height"])
+    m = measure_body(body, edge)
+    key = "ID" if m["is_inner"] else "OD"
+    values = dict(values, **{key: m["dia"]})
     validate(values, cage, balls)
 
-    # Bearing frame (on the axis at mid-height), in the races body's coordinates
-    frame = (
-        global_placement(body).inverse().multiply(frame_placement(edge, ring["mid"]))
-    )
-    params = make_params(body, values, frame, measured=True)
+    # Bearing frame (on the axis, mid-way along the selected cylinder), in body coordinates
+    frame = global_placement(body).inverse().multiply(frame_placement(edge, m["mid"]))
+    params = make_params(body, values, frame, readonly=(key,))
 
     feats = [make_groove(body, params)]
     if cage:
@@ -653,7 +704,8 @@ def create_races(doc, placement, values, reverse=False, cage=True, balls=False):
 
 
 def get_selected_edge():
-    """Return (feature, global edge) for a single selected circular edge, None if nothing is selected."""
+    """Return (feature, global edge, global shape of the selected object) for a single
+    selected circular edge, or None if nothing is selected."""
     import FreeCADGui as Gui
 
     # Resolve mode 0 gives the full selection path, so we can get the edge in global coordinates
@@ -675,17 +727,21 @@ def get_selected_edge():
 
     path = subname[: subname.rfind(".") + 1]
     feature = top.getSubObject(path, retType=1) if path else top
-    return feature, edge
+    shape = Part.getShape(top, path) if path else Part.getShape(top)
+    return feature, edge, shape
 
 
 class BearingDialog:
     """One dialog for both modes."""
 
-    def __init__(self, edge, ring):
+    def __init__(self, edge, measured, create_inner=True):
+        """`measured`: measure_body() result if the selected body can be grooved, else None.
+        `create_inner`: default for "Selected edge is" when creating races."""
         import FreeCADGui as Gui
         from PySide import QtGui
 
-        self.edge, self.ring = edge, ring
+        self.edge, self.measured, self.create_inner = edge, measured, create_inner
+        self._mode = None
         self.edge_dia = 2 * edge.Curve.Radius if edge else None
 
         self.dlg = QtGui.QDialog(Gui.getMainWindow())
@@ -715,8 +771,8 @@ class BearingDialog:
             return s
 
         self.mode = QtGui.QComboBox()
-        if ring:
-            self.mode.addItem(EXISTING)
+        if measured:
+            self.mode.addItem(GROOVE)
         self.mode.addItem(CREATE)
         row(form, "Races:", self.mode, UI_HELP["Races"])
 
@@ -741,7 +797,7 @@ class BearingDialog:
         self.reverse = QtGui.QCheckBox("Reverse direction")
         row(form, "", self.reverse, UI_HELP["Reverse"])
 
-        self.ball = spin(4.0)
+        self.ball = spin(DEFAULT_BALL_DIAMETER)
         row(form, "Ball diameter:", self.ball, BEARING_DOCS["BallDiameter"])
         self.num_balls = QtGui.QSpinBox()
         self.num_balls.setRange(1, 1000)
@@ -776,54 +832,81 @@ class BearingDialog:
 
         self.mode.currentIndexChanged.connect(self.refresh)
         self.edge_is.currentIndexChanged.connect(self.refresh)
+        for s in (self.id_, self.od, self.height):
+            s.editingFinished.connect(self.fit_sizes)
+        self.ball.valueChanged.connect(self.limit_cage)
         self.refresh()
 
-        # Defaults sized to this bearing (for 20/32 they match deep-groove-bb.FCStd: Ø4, 1.5, 10)
+    def limit_cage(self, *_):
+        """The cage can be at most as thick as the gap between the races (ball Ø / 2)."""
+        self.cage_t.setMaximum(math.floor(self.ball.value() / 2 * 100) / 100)
+
+    def fit_sizes(self, reset=False):
+        """Defaults: ball Ø4, cage 1.5, 10 balls (as in deep-groove-bb.FCStd). They are set on
+        `reset`; otherwise only values that no longer fit after ID/OD/height were edited
+        change. When Ø4 doesn't fit the bearing, a smaller ball is used instead."""
         wall = (self.od.value() - self.id_.value()) / 2
-        self.ball.setValue(round(wall * 2 / 3, 2))
-        self.cage_t.setValue(round(self.ball.value() * 0.375, 2))
+        if wall <= 0:
+            return
+        limit = min(wall, self.height.value())  # the ball must be smaller than both
+        if reset or self.ball.value() >= limit:
+            fallback = round(min(wall * 2 / 3, self.height.value() * 0.6), 2)
+            ball = DEFAULT_BALL_DIAMETER if DEFAULT_BALL_DIAMETER < limit else fallback
+            self.ball.setValue(ball)
+        # The gap between the races is half the ball diameter; the cage must fit in it
+        gap = self.ball.value() / 2
+        if reset or self.cage_t.value() > gap:
+            cage = CAGE_DEFAULTS["CageThickness"]
+            self.cage_t.setValue(cage if cage < gap else round(self.ball.value() * 0.375, 2))
         n = max_balls(
             self.id_.value(),
             self.od.value(),
             self.ball.value(),
-            CAGE_DEFAULTS["PocketClearance"],
+            self.pocket_clr.value(),
         )
-        self.num_balls.setValue(max(1, min(DEFAULT_NUM_BALLS, n)))
+        if reset:
+            self.num_balls.setValue(max(1, min(DEFAULT_NUM_BALLS, n)))
+        elif self.num_balls.value() > n:
+            self.num_balls.setValue(max(1, n))
 
     def refresh(self, *_):
-        existing = self.mode.currentText() == EXISTING
-        self.edge_is.setEnabled(not existing)
-        self.reverse.setEnabled(not existing)
+        groove = self.mode.currentText() == GROOVE
+        mode_changed = self._mode != self.mode.currentText()
+        self._mode = self.mode.currentText()
+        m = self.measured
 
-        if existing:
-            # Everything is measured from the blank
-            r = self.ring
-            self.edge_is.setCurrentIndex(0 if r["is_inner"] else 1)
-            for s, v in (
-                (self.id_, r["id"]),
-                (self.od, r["od"]),
-                (self.height, r["height"]),
-            ):
-                s.setValue(v)
-                s.setEnabled(False)
+        if mode_changed and self.edge:
+            # Each mode starts from its own defaults
+            self.edge_is.blockSignals(True)
+            inner_default = m["is_inner"] if groove else self.create_inner
+            self.edge_is.setCurrentIndex(0 if inner_default else 1)
+            self.edge_is.blockSignals(False)
+            if groove:
+                self.height.setValue(m["height"])
+
+        # Grooving the body: which diameter the edge is was detected
+        self.edge_is.setEnabled(not groove)
+        self.reverse.setEnabled(not groove)
+        self.height.setEnabled(True)
+
+        inner = self.edge_is.currentIndex() == 0
+        locked, other = (self.id_, self.od) if inner else (self.od, self.id_)
+        other.setEnabled(True)
+        if self.edge:
+            # The selected edge fixes one diameter
+            locked.setValue(self.edge_dia)
+            locked.setEnabled(False)
+            if mode_changed and groove and m["other"]:
+                other.setValue(m["other"])
+            elif inner and self.od.value() <= self.edge_dia:
+                self.od.setValue(round(self.edge_dia * 1.6, 2))
+            elif not inner and self.id_.value() >= self.edge_dia:
+                self.id_.setValue(round(self.edge_dia / 1.6, 2))
         else:
-            self.height.setEnabled(True)
-            inner = self.edge_is.currentIndex() == 0
-            locked, other = (self.id_, self.od) if inner else (self.od, self.id_)
-            other.setEnabled(True)
-            if self.edge:
-                # The selected edge fixes one diameter
-                locked.setValue(self.edge_dia)
-                locked.setEnabled(False)
-                if inner and self.od.value() <= self.edge_dia:
-                    self.od.setValue(round(self.edge_dia * 1.6, 2))
-                if not inner and self.id_.value() >= self.edge_dia:
-                    self.id_.setValue(round(self.edge_dia / 1.6, 2))
-            else:
-                locked.setEnabled(True)
+            locked.setEnabled(True)
 
-        if self.ball.value() >= (self.od.value() - self.id_.value()) / 2:
-            self.ball.setValue(round((self.od.value() - self.id_.value()) / 3, 2))
+        # A new mode starts from fresh sizes; otherwise only fix what no longer fits
+        self.fit_sizes(reset=mode_changed)
 
     def accept(self):
         """Check the values first; on a problem, say so and keep the dialog open."""
@@ -873,18 +956,24 @@ def run_gui():
         picked = get_selected_edge()
     except ValueError as e:
         return fail(str(e))
-    feature, edge = picked if picked else (None, None)
+    feature, edge, shape = picked if picked else (None, None, None)
 
-    # Offer "existing races" only when the edge is on a ring blank we can measure
-    ring = None
+    # "Groove selected body" only when the edge is on a PartDesign body we can measure
+    measured = None
     body = find_body(feature) if feature is not None else None
     if body is not None:
         try:
-            ring = measure_ring(body, edge)
+            measured = measure_body(body, edge)
         except ValueError:
-            ring = None
+            measured = None
 
-    opts = BearingDialog(edge, ring).exec_()
+    # Creating races: the end of a shaft is the bearing's ID, a housing bore its OD
+    create_inner = True
+    if shape is not None and shape.Solids:
+        side = cylinder_side(nearest_solid(shape, edge), edge)[0]
+        create_inner = side != "outside"
+
+    opts = BearingDialog(edge, measured, create_inner).exec_()
     if opts is None:
         return
 
@@ -893,12 +982,13 @@ def run_gui():
         if feature
         else (App.ActiveDocument or App.newDocument("Bearing"))
     )
+    split = True
     doc.openTransaction("Deep groove ball bearing")
     try:
-        if opts["mode"] == EXISTING:
-            groove_existing_races(
-                feature, edge, opts["values"], opts["cage"], opts["balls"]
-            )
+        if opts["mode"] == GROOVE:
+            before = len(body.Shape.Solids)
+            groove_body(feature, edge, opts["values"], opts["cage"], opts["balls"])
+            split = len(body.Shape.Solids) > before
         else:
             placement = frame_placement(edge) if edge else App.Placement()
             create_races(
@@ -915,6 +1005,14 @@ def run_gui():
     doc.commitTransaction()
     if Gui.ActiveDocument:
         Gui.SendMsgToActiveView("ViewFit")
+    if not split:
+        msg = (
+            "The groove did not split the body into separate inner and outer races. "
+            "Check the diameters and the height (the groove must cut through the body), "
+            "or edit them on BearingParameters."
+        )
+        App.Console.PrintWarning(msg + "\n")
+        QtGui.QMessageBox.warning(Gui.getMainWindow(), "Deep Groove Ball Bearing", msg)
 
 
 if App.GuiUp:
