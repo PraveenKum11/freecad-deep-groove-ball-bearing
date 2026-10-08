@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # DeepGrooveBallBearing.FCMacro
 #
 # Usage:
@@ -23,8 +22,6 @@
 #   Bearing: ID, OD, Height, BallDiameter, NumBalls  (the edge's diameter is read-only
 #            when grooving the selected body)
 #   Cage:    CageThickness, CageTopOffset, PocketClearance, PocketRise
-# (They can't sit on the Body itself: FreeCAD forbids a Body's features from
-# referencing the Body's own properties -- "cyclic reference".)
 #
 # The datum is the bearing frame: origin on the axis at mid-height, Z = bearing axis.
 # The groove sketch is attached to its XZ plane, and the Cage and Balls bodies follow it.
@@ -80,7 +77,6 @@ BEARING_DOCS = {
 }
 DEFAULT_NUM_BALLS = 10
 DEFAULT_BALL_DIAMETER = 4.0
-# Cage defaults from deep-groove-bb.FCStd
 CAGE_DEFAULTS = {
     "CageThickness": 1.5,
     "CageTopOffset": 0.5,
@@ -262,7 +258,9 @@ def measure_body(body, edge):
     solid = nearest_solid(body.Shape, edge)
     side, lo, hi = cylinder_side(solid, edge)
     if side is None:
-        raise ValueError("Could not find the cylindrical face of the selected edge on the body.")
+        raise ValueError(
+            "Could not find the cylindrical face of the selected edge on the body."
+        )
     r = edge.Curve.Radius
     is_inner = side == "outside"  # a bore is the bearing's inner diameter
     radii = [rad for _, rad in coaxial_cylinders(solid, edge)]
@@ -857,7 +855,9 @@ class BearingDialog:
         gap = self.ball.value() / 2
         if reset or self.cage_t.value() > gap:
             cage = CAGE_DEFAULTS["CageThickness"]
-            self.cage_t.setValue(cage if cage < gap else round(self.ball.value() * 0.375, 2))
+            self.cage_t.setValue(
+                cage if cage < gap else round(self.ball.value() * 0.375, 2)
+            )
         n = max_balls(
             self.id_.value(),
             self.od.value(),
