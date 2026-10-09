@@ -1,9 +1,9 @@
 # Deep Groove Ball Bearing - FreeCAD macro
 
-Creates a fully parametric deep groove ball bearing in PartDesign: the inner and outer
-races, a snap-in cage and (optionally) the balls. Pick a circular edge - the end of a
-shaft, a housing bore, or the bore of a part you want the bearing built into - fill in
-the dialog, done. Every size can be changed later from a single place.
+Creates fully parametric, **3D-printable** deep groove ball bearings in PartDesign: the
+inner and outer races, a snap-in cage and (optionally) the balls. Pick a circular edge -
+the end of a shaft, a housing bore, or the bore of a part you want the bearing built
+into - fill in the dialog, done. Every size can be changed later from a single place.
 
 <img src="images/overview.png" width="420" alt="Bearing cutaway: races (blue), cage (orange), balls (red)">
 
@@ -11,6 +11,23 @@ Tested with FreeCAD 1.1.
 
 ## Demo
 https://github.com/user-attachments/assets/4f46b9cc-24fc-4756-bc11-ebbdaf7f957a
+
+## Made for 3D printing
+
+The bearings are designed to be printed. Races, cage and balls are separate bodies, so
+each can be exported and printed on its own.
+
+<p align="center">
+  <img src="images/printed-parts.jpg" width="480" alt="Bearing parts from the macro and the printed bearing">
+</p>
+
+<p align="center">
+  <img src="images/projects.jpg" width="480" alt="Simple projects using the printed bearings">
+</p>
+
+<p align="center">
+  <img src="images/planetary-gearbox.jpg" width="640" alt="Planetary gearbox with a large printed output bearing: CAD view and printed part">
+</p>
 
 ## Install and run
 
@@ -44,9 +61,9 @@ Where the races come from.
   cage and balls go into one Part named after the bearing's size, OD x ID x Height, e.g.
   **Bearing 32x20x8**; move the Part to move the whole bearing.
 
-![Races modes](images/races-modes.png)
+<img src="images/races-modes.png" width="560" alt="Races modes">
 
-![Grooving a part with a bore](images/groove-body.png)
+<img src="images/groove-body.png" width="600" alt="Grooving a part with a bore">
 
 If the groove doesn't cut all the way through the body (e.g. the height is smaller than
 the part), the macro warns you that the races aren't separate.
@@ -71,21 +88,21 @@ That diameter is taken from the edge and locked.
   gap). Must be smaller than the ring wall, (OD − ID) / 2, and than the height. Default
   4 mm, or smaller when that doesn't fit the bearing.
 
-![Section with dimensions](images/section.png)
+<img src="images/section.png" width="600" alt="Section with dimensions">
 
 ### Reverse direction
 
 _Create races_ only: builds the bearing on the other side of the selected edge. Use it to
 put the bearing _onto_ a shaft instead of past its end.
 
-![Reverse direction](images/reverse.png)
+<img src="images/reverse.png" width="560" alt="Reverse direction">
 
 ### Number of balls
 
 How many balls (and cage pockets) are spaced evenly around the bearing. The maximum
 depends on ball size and pitch diameter; the macro tells you if it's too many.
 
-![Number of balls](images/num-balls.png)
+<img src="images/num-balls.png" width="560" alt="Number of balls">
 
 ### Cage
 
@@ -97,28 +114,28 @@ the axis until its pockets are centered on the balls, as it sits in a real beari
   races, so it can be at most half the ball diameter (2 mm for a 4 mm ball); anything
   less is running clearance. Default 1.5 mm.
 
-  ![Cage thickness](images/cage-thickness.png)
+  <img src="images/cage-thickness.png" width="520" alt="Cage thickness">
 
 - **Cage top offset** - sets how tall the cage is: the cage reaches from the races' face to
   this distance short of where the race grooves meet the ball. Larger = shorter cage.
 
-  ![Cage top offset](images/cage-top-offset.png)
+  <img src="images/cage-top-offset.png" width="520" alt="Cage top offset">
 
 - **Pocket clearance** - extra diameter given to each ball pocket so the balls turn freely
   (pocket Ø = ball Ø + clearance).
 
-  ![Pocket clearance](images/pocket-clearance.png)
+  <img src="images/pocket-clearance.png" width="520" alt="Pocket clearance">
 
 - **Pocket rise** - how far each pocket reaches past the cage's open edge. Smaller = the
   pocket mouth is narrower than the ball, so the balls snap in and are held.
 
-  ![Pocket rise](images/pocket-rise.png)
+  <img src="images/pocket-rise.png" width="520" alt="Pocket rise">
 
 ### Balls
 
 **Create balls** (off by default) also models the balls as a separate **Balls** body.
 
-![Cage and balls options](images/cage-balls.png)
+<img src="images/cage-balls.png" width="640" alt="Cage and balls options">
 
 ## Changing the bearing later
 
