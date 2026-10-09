@@ -11,6 +11,8 @@
 #      - "Create races": a new ring with both races is built. The edge (on anything,
 #        e.g. a shaft or a housing bore) sets the bearing's position, axis and either
 #        its ID or its OD. With nothing selected, it is created at the origin on Z.
+#        Races, cage and balls go into one App::Part labelled with the bearing's size,
+#        e.g. "Bearing 32x20x8" (OD x ID x Height); move the Part to move the bearing.
 #   3. Enter the ball diameter, number of balls and the cage/ball options. A sketch is
 #      created in a plane containing the bearing axis, and one PartDesign Groove cuts it
 #      around that axis, splitting the blank into the (disconnected) inner and outer races.
@@ -648,15 +650,28 @@ def groove_body(feature, edge, values, cage=True, balls=False):
     return params
 
 
+def bearing_label(values):
+    """Part label with the bearing's size, OD x ID x Height, e.g. "Bearing 32x20x8"."""
+
+    def num(x):
+        return ("%.2f" % x).rstrip("0").rstrip(".")
+
+    return "Bearing %sx%sx%s" % (num(values["OD"]), num(values["ID"]), num(values["Height"]))
+
+
 def create_races(doc, placement, values, reverse=False, cage=True, balls=False):
     """Build a parametric ring blank, then groove it into two races.
 
     `placement` is the global frame of the bearing: Z = axis, origin = one face center.
-    The ring is padded along +Z (or -Z when `reverse`).
+    The ring is padded along +Z (or -Z when `reverse`). The races, cage and balls bodies
+    go into one App::Part (labelled by bearing_label()) that carries this placement.
     """
     validate(values, cage, balls)
-    body = doc.addObject("PartDesign::Body", "Bearing")
-    body.Placement = placement
+    part = doc.addObject("App::Part", "Bearing")
+    part.Label = bearing_label(values)
+    part.Placement = placement
+    body = doc.addObject("PartDesign::Body", "Races")
+    part.addObject(body)  # the cage and balls bodies join it (follow_bearing)
 
     # Datum at mid-height; it follows Height so the frame stays centered
     params = make_params(

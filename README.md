@@ -40,7 +40,9 @@ Where the races come from.
   The other diameter and the height set where the groove goes; they're prefilled from the
   body (the nearest matching cylinder, and the length of the selected one).
 - **Create races** - build a new ring with both races. The selected edge (on anything, e.g.
-  the end of a shaft or a housing bore) sets the bearing's position and axis.
+  the end of a shaft or a housing bore) sets the bearing's position and axis. The races,
+  cage and balls go into one Part named after the bearing's size, OD x ID x Height, e.g.
+  **Bearing 32x20x8**; move the Part to move the whole bearing.
 
 ![Races modes](images/races-modes.png)
 
@@ -120,10 +122,14 @@ the axis until its pockets are centered on the balls, as it sits in a real beari
 
 ## Changing the bearing later
 
-All values are stored on the **BearingParameters** datum inside the bearing's Body. Select
-it in the tree and edit the values in the property editor; the races, cage and balls
-update. Each bearing has its own datum, so several bearings can live in one document.
-With _Groove selected body_, the diameter taken from the selected edge is read-only.
+All values are stored on the **BearingParameters** datum inside the bearing's races Body
+(_Races_ when created by the macro). Select it in the tree and edit the values in the
+property editor; the races, cage and balls update. Each bearing has its own datum, so
+several bearings can live in one document. With _Groove selected body_, the diameter taken
+from the selected edge is read-only.
+
+The size in the Part's name is set when the bearing is created; after changing ID, OD or
+Height, rename the Part to match.
 
 ## AI disclosure
 
