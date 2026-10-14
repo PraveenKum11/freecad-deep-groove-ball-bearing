@@ -6,12 +6,13 @@ the end of a shaft, a housing bore, or the bore of a part you want the bearing b
 into - fill in the task panel while a live preview shows the bearing in place, done.
 Every size can be changed later from a single place.
 
-<img src="images/overview.png" width="420" alt="Bearing cutaway: races (blue), cage (orange), balls (red)">
+<img src="images/turntable.gif" width="420" alt="Bearing cutaway turning: races (blue), cage (orange), balls (red)">
 
 Tested with FreeCAD 1.1.
 
 ## Demo
-https://github.com/user-attachments/assets/4f46b9cc-24fc-4756-bc11-ebbdaf7f957a
+
+<img src="images/workflow.gif" width="860" alt="Select a hole edge, run the macro, pick 6808 and 4.5 mm balls, set 24 balls, OK: races and cage are built">
 
 ## Made for 3D printing
 
