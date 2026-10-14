@@ -87,9 +87,26 @@ That diameter is taken from the edge and locked.
 ### Catalog size
 
 Prefills the inner diameter, outer diameter and height from a standard bearing (608, 625,
-6204, MR105, …; ISO 15 sizes of series 60, 62, 63, 68, 69 and MR miniatures). With a
-selected edge, only sizes matching its diameter are listed. It shows **Custom** when the
-sizes don't match a catalog bearing. Not available when grooving a body.
+6204, MR105, R188, …). With a selected edge, only sizes matching its diameter are listed.
+It shows **Custom** when the sizes don't match a catalog bearing. Not available when
+grooving a body.
+
+#### Supported bearings
+
+176 deep groove ball bearing sizes, the same tables as in the Bearings workbench: ISO 15
+boundary dimensions for series 60–69, common metric miniatures and inch R sizes (converted
+to mm). Where a shielded (ZZ / 2RS) bearing is wider than the open one, both widths are
+recognised (688 is 4 mm open, 5 mm as 688ZZ).
+
+| Series | Sizes | Designations |
+|---|---|---|
+| 60 (deep groove, light) | 27 | 604, 605, 606, 607, 608, 609, 6000, 6001, 6002, 6003, 6004, 6005, 6006, 6007, 6008, 6009, 6010, 6011, 6012, 6013, 6014, 6015, 6016, 6017, 6018, 6019, 6020 |
+| 62 (deep groove, medium) | 28 | 623, 624, 625, 626, 627, 628, 629, 6200, 6201, 6202, 6203, 6204, 6205, 6206, 6207, 6208, 6209, 6210, 6211, 6212, 6213, 6214, 6215, 6216, 6217, 6218, 6219, 6220 |
+| 63 (deep groove, heavy) | 27 | 634, 635, 636, 637, 638, 639, 6300, 6301, 6302, 6303, 6304, 6305, 6306, 6307, 6308, 6309, 6310, 6311, 6312, 6313, 6314, 6315, 6316, 6317, 6318, 6319, 6320 |
+| 68 / 618 (thin section) | 30 | 681, 682, 683, 684, 685, 686, 687, 688, 689, 6800, 6801, 6802, 6803, 6804, 6805, 6806, 6807, 6808, 6809, 6810, 6811, 6812, 6813, 6814, 6815, 6816, 6817, 6818, 6819, 6820 |
+| 69 / 619 (thin section) | 30 | 691, 692, 693, 694, 695, 696, 697, 698, 699, 6900, 6901, 6902, 6903, 6904, 6905, 6906, 6907, 6908, 6909, 6910, 6911, 6912, 6913, 6914, 6915, 6916, 6917, 6918, 6919, 6920 |
+| MR (metric miniature) | 15 | MR52, MR62, MR63, MR74, MR84, MR85, MR95, MR105, MR115, MR106, MR126, MR117, MR137, MR128, MR148 |
+| R (inch) | 19 | R144, R2-5, R2-6, R2, R2A, R155, R156, R166, R3, R3A, R168, R188, R4, R4A, R1810, R6, R8, R10, R12 |
 
 ### Inner diameter, Outer diameter, Height, Ball diameter
 
