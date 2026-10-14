@@ -3,7 +3,8 @@
 Creates fully parametric, **3D-printable** deep groove ball bearings in PartDesign: the
 inner and outer races, a snap-in cage and (optionally) the balls. Pick a circular edge -
 the end of a shaft, a housing bore, or the bore of a part you want the bearing built
-into - fill in the dialog, done. Every size can be changed later from a single place.
+into - fill in the task panel while a live preview shows the bearing in place, done.
+Every size can be changed later from a single place.
 
 <img src="images/overview.png" width="420" alt="Bearing cutaway: races (blue), cage (orange), balls (red)">
 
@@ -36,11 +37,12 @@ each can be exported and printed on its own.
 2. Select one circular edge (or nothing, to build the bearing at the origin).
 3. _Macro → Macros… → DeepGrooveBallBearing.FCMacro → Execute_.
 
-## Dialog parameters
+## Task panel
 
-<img src="images/dialog.png" width="330" alt="The macro dialog">
+The macro opens a task panel next to the 3D view, so you can still rotate and zoom while
+you fill it in.
 
-Every field also has a tooltip in the dialog.
+<img src="images/dialog.png" width="330" alt="The macro's task panel">
 
 ### Races
 
@@ -54,12 +56,15 @@ Where the races come from.
     the body keeps the inner race groove.
   - A plain **ring** you modelled simply becomes the inner and outer race.
 
-  The other diameter and the height set where the groove goes; they're prefilled from the
-  body (the nearest matching cylinder, and the length of the selected one).
+  The other diameter and the height set where the groove goes. The other diameter starts
+  15 mm from the selected one (OD = bore + 15, or ID = outer surface − 15); the height is
+  the length of the selected bore or surface.
 - **Create races** - build a new ring with both races. The selected edge (on anything, e.g.
   the end of a shaft or a housing bore) sets the bearing's position and axis. The races,
   cage and balls go into one Part named after the bearing's size, OD x ID x Height, e.g.
-  **Bearing 32x20x8**; move the Part to move the whole bearing.
+  **Bearing 32x20x8**, or **Bearing 608 (22x8x7)** for a catalog size; move the Part to
+  move the whole bearing. The other diameter starts 15 mm from the selected edge's and the
+  height at 8 mm.
 
 <img src="images/races-modes.png" width="560" alt="Races modes">
 
@@ -78,6 +83,13 @@ That diameter is taken from the edge and locked.
 - _Create races_: preset from the edge - the end of a shaft is the inner diameter, a
   housing bore the outer diameter - and you can change it.
 
+### Catalog size
+
+Prefills the inner diameter, outer diameter and height from a standard bearing (608, 625,
+6204, MR105, …; ISO 15 sizes of series 60, 62, 63, 68, 69 and MR miniatures). With a
+selected edge, only sizes matching its diameter are listed. It shows **Custom** when the
+sizes don't match a catalog bearing. Not available when grooving a body.
+
 ### Inner diameter, Outer diameter, Height, Ball diameter
 
 - **Inner diameter** - bore of the inner race (the shaft size).
@@ -86,14 +98,18 @@ That diameter is taken from the edge and locked.
 - **Ball diameter** - the balls run on the pitch diameter, midway between ID and OD, and
   the gap between the two races is always half the ball diameter (a 4 mm ball gives a 2 mm
   gap). Must be smaller than the ring wall, (OD − ID) / 2, and than the height. Default
-  4 mm, or smaller when that doesn't fit the bearing.
+  4 mm; the status line tells you when it doesn't fit.
+- **Ball preset** - common balls to buy for printed bearings: 3 mm, 1/8", 4 mm, 4.5 mm
+  steel BB, 5 mm, 6 mm airsoft BB (measures 5.95 mm), 6 mm and 1/4". Picking one sets the
+  ball diameter.
 
 <img src="images/section.png" width="600" alt="Section with dimensions">
 
 ### Reverse direction
 
-_Create races_ only: builds the bearing on the other side of the selected edge. Use it to
-put the bearing _onto_ a shaft instead of past its end.
+_Create races_ only: builds the bearing on the other side of the selected edge. It is
+preset so the bearing goes _into_ a housing bore or _onto_ a shaft; tick or untick it to
+build past the edge instead.
 
 <img src="images/reverse.png" width="560" alt="Reverse direction">
 
@@ -136,6 +152,13 @@ the axis until its pockets are centered on the balls, as it sits in a real beari
 **Create balls** (off by default) also models the balls as a separate **Balls** body.
 
 <img src="images/cage-balls.png" width="640" alt="Cage and balls options">
+
+### Show preview
+
+While the panel is open, the 3D view shows the inner and outer diameter as labelled rings
+on both faces (drawn on top, so you see them through the part) and a see-through view of
+the races, balls and cage, in every mode, including when grooving a body. It is only a
+preview: nothing is added to the document until OK. Untick it to hide it.
 
 ## Changing the bearing later
 
